@@ -35,6 +35,9 @@ class ImageResizer {
       @Nullable Integer imageQuality) {
     Bitmap bmp = decodeFile(imagePath);
     if (bmp == null) {
+      if(imagePath.endsWith(".svg")) {
+        return imagePath;
+      }
       return null;
     }
     boolean shouldScale =

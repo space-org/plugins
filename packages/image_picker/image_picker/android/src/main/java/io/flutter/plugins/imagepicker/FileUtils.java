@@ -1,98 +1,135 @@
-// Copyright 2019 The Flutter Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
-
-/*
- * Copyright (C) 2007-2008 OpenIntents.org
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * This file was modified by the Flutter authors from the following original file:
- * https://raw.githubusercontent.com/iPaulPro/aFileChooser/master/aFileChooser/src/com/ipaulpro/afilechooser/utils/FileUtils.java
- */
-
 package io.flutter.plugins.imagepicker;
 
 import android.content.Context;
+import android.database.Cursor;
 import android.net.Uri;
-import java.io.File;
+import android.util.Log;
+
+import java.io.BufferedOutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.util.Random;
 
-class FileUtils {
+public class FileUtils {
+
+  private static final String TAG = "FilePickerUtils";
 
   String getPathFromUri(final Context context, final Uri uri) {
-    File file = null;
-    InputStream inputStream = null;
-    OutputStream outputStream = null;
-    boolean success = false;
-    try {
-      String extension = getImageExtension(uri);
-      inputStream = context.getContentResolver().openInputStream(uri);
-      file = File.createTempFile("image_picker", extension, context.getCacheDir());
-      file.deleteOnExit();
-      outputStream = new FileOutputStream(file);
-      if (inputStream != null) {
-        copy(inputStream, outputStream);
-        success = true;
-      }
-    } catch (IOException ignored) {
-    } finally {
-      try {
-        if (inputStream != null) inputStream.close();
-      } catch (IOException ignored) {
-      }
-      try {
-        if (outputStream != null) outputStream.close();
-      } catch (IOException ignored) {
-        // If closing the output stream fails, we cannot be sure that the
-        // target file was written in full. Flushing the stream merely moves
-        // the bytes into the OS, not necessarily to the file.
-        success = false;
-      }
+    String path = getPathFromLocalUri(context, uri);
+    if (path == null) {
+      path = getPathFromRemoteUri(context, uri);
     }
-    return success ? file.getPath() : null;
+    return path;
   }
 
-  /** @return extension of image with dot, or default .jpg if it none. */
-  private static String getImageExtension(Uri uriImage) {
-    String extension = null;
+  public static String getPathFromLocalUri(Context context, final Uri uri) {
+    if ("content".equalsIgnoreCase(uri.getScheme())) {
+      if (isGooglePhotosUri(uri)) {
+        return uri.getLastPathSegment();
+      }
+      return getDataColumn(context, uri, null, null);
+    } else if ("file".equalsIgnoreCase(uri.getScheme())) {
+      return uri.getPath();
+    }
+    return null;
+  }
+
+  private static String getDataColumn(Context context, Uri uri, String selection,
+                                      String[] selectionArgs) {
+    Cursor cursor = null;
+    final String column = "_data";
+    final String[] projection = {
+            column
+    };
+    try {
+      cursor = context.getContentResolver().query(uri, projection, selection, selectionArgs,
+              null);
+      if (cursor != null && cursor.moveToFirst()) {
+        final int index = cursor.getColumnIndexOrThrow(column);
+        return cursor.getString(index);
+      }
+    } catch(Exception ex){
+    } finally {
+      if (cursor != null)
+        cursor.close();
+    }
+    return null;
+  }
+
+  public static String getFileName(Uri uri, Context context) {
+    String result = null;
+
+    //if uri is content
+    if (uri.getScheme() != null && uri.getScheme().equals("content")) {
+      Cursor cursor = context.getContentResolver().query(uri, null, null, null, null);
+      try {
+        if (cursor != null && cursor.moveToFirst()) {
+          //local filesystem
+          int index = cursor.getColumnIndex("_data");
+          if (index == -1)
+            //google drive
+            index = cursor.getColumnIndex("_display_name");
+          result = cursor.getString(index);
+          if (result != null)
+            uri = Uri.parse(result);
+          else
+            return null;
+        }
+      } finally {
+        cursor.close();
+      }
+    }
+
+    if(uri.getPath() != null) {
+      result = uri.getPath();
+      int cut = result.lastIndexOf('/');
+      if (cut != -1)
+        result = result.substring(cut + 1);
+    }
+
+    return result;
+  }
+
+  public static String getPathFromRemoteUri(Context context, Uri uri) {
+    Log.i(TAG, "Caching file from remote/external URI");
+    FileOutputStream fos = null;
+    final String fileName = FileUtils.getFileName(uri, context);
+    String externalFile = context.getCacheDir().getAbsolutePath() + "/" + (fileName != null ? fileName : new Random().nextInt(100000));
 
     try {
-      String imagePath = uriImage.getPath();
-      if (imagePath != null && imagePath.lastIndexOf(".") != -1) {
-        extension = imagePath.substring(imagePath.lastIndexOf(".") + 1);
+      fos = new FileOutputStream(externalFile);
+      try {
+        BufferedOutputStream out = new BufferedOutputStream(fos);
+        InputStream in = context.getContentResolver().openInputStream(uri);
+
+        byte[] buffer = new byte[8192];
+        int len = 0;
+
+        while ((len = in.read(buffer)) >= 0) {
+          out.write(buffer, 0, len);
+        }
+
+        out.flush();
+      } finally {
+        fos.getFD().sync();
       }
     } catch (Exception e) {
-      extension = null;
+      try {
+        fos.close();
+      } catch(IOException | NullPointerException ex) {
+        Log.e(TAG, "Failed to close file streams: " + e.getMessage(),null);
+        return null;
+      }
+      Log.e(TAG, "Failed to retrieve path: " + e.getMessage(),null);
+      return null;
     }
 
-    if (extension == null || extension.isEmpty()) {
-      //default extension for matches the previous behavior of the plugin
-      extension = "jpg";
-    }
-
-    return "." + extension;
+    Log.i(TAG, "File loaded and cached at:" + externalFile);
+    return externalFile;
   }
 
-  private static void copy(InputStream in, OutputStream out) throws IOException {
-    final byte[] buffer = new byte[4 * 1024];
-    int bytesRead;
-    while ((bytesRead = in.read(buffer)) != -1) {
-      out.write(buffer, 0, bytesRead);
-    }
-    out.flush();
+  private static boolean isGooglePhotosUri(Uri uri) {
+    return "com.google.android.apps.photos.content".equals(uri.getAuthority());
   }
 }
